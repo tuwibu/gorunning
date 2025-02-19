@@ -15,7 +15,7 @@ func main() {
 	// Đường dẫn tới ứng dụng con cần chạy (exe, ví dụ)
 	exePath := "./main.exe"
 	// Thời gian không có output để xem xét tiến trình bị treo (ví dụ: 5 phút)
-	inactivityDuration := 5 * time.Minute
+	inactivityDuration := 10 * time.Minute
 
 	for {
 		log.Println("Khởi chạy tiến trình:", exePath, "với tham số:", args)
