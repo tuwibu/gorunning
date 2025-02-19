@@ -6,6 +6,7 @@ import (
 	"log"
 	"os"
 	"os/exec"
+	"strconv"
 	"sync"
 	"time"
 )
@@ -83,7 +84,14 @@ func main() {
 				case <-timer.C:
 					log.Printf("Không có output trong %v, tiến trình có thể đã treo. Kill tiến trình...", inactivityDuration)
 					if cmd.Process != nil {
-						_ = cmd.Process.Kill()
+						// Sử dụng taskkill để kill toàn bộ cây tiến trình trên Windows
+						pidStr := strconv.Itoa(cmd.Process.Pid)
+						err := exec.Command("taskkill", "/T", "/F", "/PID", pidStr).Run()
+						if err != nil {
+							log.Println("Lỗi khi thực hiện taskkill:", err)
+						} else {
+							log.Println("Đã kill thành công tiến trình và cây tiến trình con.")
+						}
 					}
 					return
 				case <-stopMonitor:
