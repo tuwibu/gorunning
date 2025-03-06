@@ -15,9 +15,9 @@ import (
 
 func main() {
 	args := os.Args[1:]
-	// Đường dẫn tới ứng dụng con cần chạy (exe, ví dụ)
+	// Path to the child application to run (exe, for example)
 	exePath := "./main.exe"
-	// Thời gian không có output để xem xét tiến trình bị treo (ví dụ: 5 phút)
+	// Duration without output to consider process as hung (example: 5 minutes)
 	inactivityDuration := 10 * time.Minute
 
 	// Tạo channel để xử lý signal
@@ -33,17 +33,17 @@ func main() {
 	// Goroutine xử lý signal
 	go func() {
 		<-sigChan
-		log.Println("Nhận được signal Ctrl+C, đang thoát chương trình...")
+		log.Println("Received Ctrl+C signal, exiting program...")
 
 		cmdMutex.Lock()
 		if currentCmd != nil && currentCmd.Process != nil {
-			// Kill toàn bộ cây tiến trình
+			// Kill entire process tree
 			pidStr := strconv.Itoa(currentCmd.Process.Pid)
 			err := exec.Command("taskkill", "/T", "/F", "/PID", pidStr).Run()
 			if err != nil {
-				log.Println("Lỗi khi thực hiện taskkill:", err)
+				log.Println("Error executing taskkill:", err)
 			} else {
-				log.Println("Đã kill thành công tiến trình và cây tiến trình con.")
+				log.Println("Successfully killed process and its child processes.")
 			}
 		}
 		cmdMutex.Unlock()
@@ -54,10 +54,10 @@ func main() {
 	for {
 		select {
 		case <-exitChan:
-			log.Println("Chương trình kết thúc.")
+			log.Println("Program terminated.")
 			return
 		default:
-			log.Println("Khởi chạy tiến trình:", exePath, "với tham số:", args)
+			log.Println("Starting process:", exePath, "with arguments:", args)
 			cmd := exec.Command(exePath, args...)
 
 			cmdMutex.Lock()
@@ -67,18 +67,18 @@ func main() {
 			// Tạo pipe để lấy stdout và stderr
 			stdout, err := cmd.StdoutPipe()
 			if err != nil {
-				log.Println("Lỗi khi lấy stdout pipe:", err)
+				log.Println("Error getting stdout pipe:", err)
 				continue
 			}
 			stderr, err := cmd.StderrPipe()
 			if err != nil {
-				log.Println("Lỗi khi lấy stderr pipe:", err)
+				log.Println("Error getting stderr pipe:", err)
 				continue
 			}
 
 			// Khởi chạy tiến trình con
 			if err := cmd.Start(); err != nil {
-				log.Println("Lỗi khi khởi chạy tiến trình con:", err)
+				log.Println("Error starting child process:", err)
 				continue
 			}
 
@@ -124,15 +124,15 @@ func main() {
 						timer.Reset(inactivityDuration)
 					// Nếu timer hết hạn, coi như tiến trình không có hoạt động
 					case <-timer.C:
-						log.Printf("Không có output trong %v, tiến trình có thể đã treo. Kill tiến trình...", inactivityDuration)
+						log.Printf("No output for %v, process might be hung. Killing process...", inactivityDuration)
 						if cmd.Process != nil {
-							// Sử dụng taskkill để kill toàn bộ cây tiến trình trên Windows
+							// Use taskkill to kill the entire process tree on Windows
 							pidStr := strconv.Itoa(cmd.Process.Pid)
 							err := exec.Command("taskkill", "/T", "/F", "/PID", pidStr).Run()
 							if err != nil {
-								log.Println("Lỗi khi thực hiện taskkill:", err)
+								log.Println("Error executing taskkill:", err)
 							} else {
-								log.Println("Đã kill thành công tiến trình và cây tiến trình con.")
+								log.Println("Successfully killed process and its child processes.")
 							}
 						}
 						return
@@ -151,16 +151,16 @@ func main() {
 			wg.Wait()
 
 			if err != nil {
-				log.Println("Tiến trình con kết thúc với lỗi:", err)
+				log.Println("Child process terminated with error:", err)
 			} else {
-				log.Println("Tiến trình con kết thúc bình thường.")
+				log.Println("Child process terminated normally.")
 			}
 
 			cmdMutex.Lock()
 			currentCmd = nil
 			cmdMutex.Unlock()
 
-			log.Println("Khởi chạy lại tiến trình sau 1 giây...")
+			log.Println("Restarting process in 1 second...")
 			time.Sleep(1 * time.Second)
 		}
 	}
