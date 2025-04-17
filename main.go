@@ -19,18 +19,35 @@ func parseAutoRestart(args []string) ([]string, int) {
 	var filteredArgs []string
 	autoRestartSeconds := 0
 
+	// Parse all --key=value arguments
 	for _, arg := range args {
-		// Support both --auto-restart=N and auto-restart=N formats
-		if strings.HasPrefix(arg, "--auto-restart=") || strings.HasPrefix(arg, "auto-restart=") {
-			valueStr := strings.TrimPrefix(strings.TrimPrefix(arg, "--"), "auto-restart=")
-			if value, err := strconv.Atoi(valueStr); err == nil {
-				autoRestartSeconds = value
-			} else {
-				log.Printf("Warning: Invalid auto-restart value: %s", valueStr)
-			}
-		} else {
+		// Skip non-flag arguments
+		if !strings.HasPrefix(arg, "--") {
 			filteredArgs = append(filteredArgs, arg)
+			continue
 		}
+
+		// Split into key-value
+		parts := strings.SplitN(strings.TrimPrefix(arg, "--"), "=", 2)
+		if len(parts) != 2 {
+			filteredArgs = append(filteredArgs, arg)
+			continue
+		}
+
+		key, value := parts[0], parts[1]
+
+		// Handle auto-restart separately
+		if key == "auto-restart" {
+			if val, err := strconv.Atoi(value); err == nil {
+				autoRestartSeconds = val
+			} else {
+				log.Printf("Warning: Invalid auto-restart value: %s", value)
+			}
+			continue
+		}
+
+		// Keep other flags
+		filteredArgs = append(filteredArgs, arg)
 	}
 
 	return filteredArgs, autoRestartSeconds
