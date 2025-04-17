@@ -8,36 +8,56 @@ import (
 	"os/exec"
 	"os/signal"
 	"strconv"
+	"strings"
 	"sync"
 	"syscall"
 	"time"
 )
 
+// parseAutoRestart extracts auto-restart value and filters out this argument
+func parseAutoRestart(args []string) ([]string, int) {
+	var filteredArgs []string
+	autoRestartSeconds := 0
+
+	for _, arg := range args {
+		// Support both --auto-restart=N and auto-restart=N formats
+		if strings.HasPrefix(arg, "--auto-restart=") || strings.HasPrefix(arg, "auto-restart=") {
+			valueStr := strings.TrimPrefix(strings.TrimPrefix(arg, "--"), "auto-restart=")
+			if value, err := strconv.Atoi(valueStr); err == nil {
+				autoRestartSeconds = value
+			} else {
+				log.Printf("Warning: Invalid auto-restart value: %s", valueStr)
+			}
+		} else {
+			filteredArgs = append(filteredArgs, arg)
+		}
+	}
+
+	return filteredArgs, autoRestartSeconds
+}
+
 func main() {
-	args := os.Args[1:]
-	// Path to the child application to run (exe, for example)
+	// Parse and filter out auto-restart argument
+	args, autoRestartSeconds := parseAutoRestart(os.Args[1:])
 	exePath := "./main.exe"
-	// Duration without output to consider process as hung (example: 5 minutes)
 	inactivityDuration := 10 * time.Minute
 
-	// Tạo channel để xử lý signal
+	log.Printf("Auto-restart interval: %d seconds", autoRestartSeconds)
+
 	sigChan := make(chan os.Signal, 1)
 	signal.Notify(sigChan, os.Interrupt, syscall.SIGTERM)
 
-	// Channel để thông báo chương trình cần thoát
 	exitChan := make(chan struct{})
 
 	var currentCmd *exec.Cmd
 	var cmdMutex sync.Mutex
 
-	// Goroutine xử lý signal
 	go func() {
 		<-sigChan
 		log.Println("Received Ctrl+C signal, exiting program...")
 
 		cmdMutex.Lock()
 		if currentCmd != nil && currentCmd.Process != nil {
-			// Kill entire process tree
 			pidStr := strconv.Itoa(currentCmd.Process.Pid)
 			err := exec.Command("taskkill", "/T", "/F", "/PID", pidStr).Run()
 			if err != nil {
@@ -64,7 +84,6 @@ func main() {
 			currentCmd = cmd
 			cmdMutex.Unlock()
 
-			// Tạo pipe để lấy stdout và stderr
 			stdout, err := cmd.StdoutPipe()
 			if err != nil {
 				log.Println("Error getting stdout pipe:", err)
@@ -76,25 +95,21 @@ func main() {
 				continue
 			}
 
-			// Khởi chạy tiến trình con
 			if err := cmd.Start(); err != nil {
 				log.Println("Error starting child process:", err)
 				continue
 			}
 
-			// Channel để thông báo có output mới
 			outputCh := make(chan struct{}, 1)
 			wg := sync.WaitGroup{}
 			wg.Add(2)
 
-			// Hàm đọc output từ reader và gửi thông báo qua outputCh
 			readOutput := func(r io.ReadCloser) {
 				defer wg.Done()
 				scanner := bufio.NewScanner(r)
 				for scanner.Scan() {
 					line := scanner.Text()
 					log.Println(line)
-					// Gửi tín hiệu có output mới (không block nếu channel đầy)
 					select {
 					case outputCh <- struct{}{}:
 					default:
@@ -102,13 +117,37 @@ func main() {
 				}
 			}
 
-			// Bắt đầu đọc stdout và stderr trong các goroutine riêng biệt
 			go readOutput(stdout)
 			go readOutput(stderr)
 
-			// Goroutine giám sát inactivity
 			stopMonitor := make(chan struct{})
 			monitorDone := make(chan struct{})
+
+			// Auto-restart timer goroutine
+			if autoRestartSeconds > 0 {
+				go func() {
+					timer := time.NewTimer(time.Duration(autoRestartSeconds) * time.Second)
+					defer timer.Stop()
+
+					select {
+					case <-timer.C:
+						log.Printf("Auto-restart timer (%d seconds) expired. Killing process...", autoRestartSeconds)
+						if cmd.Process != nil {
+							pidStr := strconv.Itoa(cmd.Process.Pid)
+							err := exec.Command("taskkill", "/T", "/F", "/PID", pidStr).Run()
+							if err != nil {
+								log.Println("Error executing taskkill:", err)
+							} else {
+								log.Println("Successfully killed process for auto-restart.")
+							}
+						}
+					case <-stopMonitor:
+						return
+					}
+				}()
+			}
+
+			// Inactivity monitor goroutine
 			go func() {
 				defer close(monitorDone)
 				timer := time.NewTimer(inactivityDuration)
@@ -116,17 +155,14 @@ func main() {
 
 				for {
 					select {
-					// Mỗi khi có output, reset lại timer
 					case <-outputCh:
 						if !timer.Stop() {
 							<-timer.C
 						}
 						timer.Reset(inactivityDuration)
-					// Nếu timer hết hạn, coi như tiến trình không có hoạt động
 					case <-timer.C:
 						log.Printf("No output for %v, process might be hung. Killing process...", inactivityDuration)
 						if cmd.Process != nil {
-							// Use taskkill to kill the entire process tree on Windows
 							pidStr := strconv.Itoa(cmd.Process.Pid)
 							err := exec.Command("taskkill", "/T", "/F", "/PID", pidStr).Run()
 							if err != nil {
@@ -142,12 +178,9 @@ func main() {
 				}
 			}()
 
-			// Chờ tiến trình con kết thúc (bất kể tự thoát hay bị kill)
 			err = cmd.Wait()
-			// Dừng goroutine giám sát
 			close(stopMonitor)
 			<-monitorDone
-			// Chờ các goroutine đọc output hoàn thành
 			wg.Wait()
 
 			if err != nil {
