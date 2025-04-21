@@ -2,6 +2,7 @@ package main
 
 import (
 	"bufio"
+	"fmt"
 	"io"
 	"log"
 	"os"
@@ -53,6 +54,96 @@ func parseAutoRestart(args []string) ([]string, int) {
 	return filteredArgs, autoRestartSeconds
 }
 
+// checkAndUpdateExecutable checks for new version and updates if available
+func checkAndUpdateExecutable(exePath string) error {
+	newExePath := "./.main.exe.new"
+
+	// Check if new version exists
+	if _, err := os.Stat(newExePath); os.IsNotExist(err) {
+		return nil // No update available
+	}
+
+	log.Println("Found new version, attempting to update...")
+
+	// Get current process ID to avoid killing ourselves
+	currentPID := os.Getpid()
+	log.Printf("Current process ID: %d", currentPID)
+
+	// Kill all processes with matching titles except current
+	killProcess := func(processName string) {
+		cmd := exec.Command("powershell", "-Command", fmt.Sprintf("Get-Process -Name '%s' -ErrorAction SilentlyContinue | Select-Object Id", strings.TrimSuffix(processName, ".exe")))
+		output, err := cmd.Output()
+		if err != nil {
+			// Ignore error as it might mean no process found
+			log.Printf("No running process found for %s", processName)
+			return
+		}
+
+		// Parse PowerShell output
+		lines := strings.Split(string(output), "\n")
+		foundProcess := false
+		for _, line := range lines {
+			line = strings.TrimSpace(line)
+			if line == "" || strings.Contains(line, "Id") {
+				continue
+			}
+			if pid, err := strconv.Atoi(line); err == nil {
+				if pid != currentPID {
+					foundProcess = true
+					log.Printf("Found process %s with PID %d, attempting to kill...", processName, pid)
+					killCmd := exec.Command("taskkill", "/F", "/PID", strconv.Itoa(pid))
+					if err := killCmd.Run(); err != nil {
+						log.Printf("Warning: Error killing %s (PID %d): %v", processName, pid, err)
+					} else {
+						log.Printf("Successfully killed %s (PID %d)", processName, pid)
+					}
+				} else {
+					log.Printf("Skipping current process (PID %d)", pid)
+				}
+			}
+		}
+		if !foundProcess {
+			log.Printf("No other %s processes found to kill", processName)
+		}
+	}
+
+	killProcess("main.exe")
+	killProcess(".main.exe.new")
+
+	// Wait for processes to fully terminate
+	log.Println("Waiting for processes to terminate...")
+	time.Sleep(2 * time.Second)
+
+	// Remove old executable if exists
+	log.Printf("Attempting to remove old executable: %s", exePath)
+	if err := os.Remove(exePath); err != nil {
+		if !os.IsNotExist(err) {
+			log.Printf("Warning: Error removing old executable: %v", err)
+		} else {
+			log.Println("Old executable does not exist, continuing...")
+		}
+	} else {
+		log.Println("Successfully removed old executable")
+	}
+
+	// Wait a bit after removal
+	time.Sleep(1 * time.Second)
+
+	// Rename new executable
+	log.Println("Attempting to rename new executable...")
+	for attempts := 0; attempts < 3; attempts++ {
+		err := os.Rename(newExePath, exePath)
+		if err == nil {
+			log.Println("Successfully updated executable")
+			return nil
+		}
+		log.Printf("Attempt %d: Error renaming executable: %v", attempts+1, err)
+		time.Sleep(1 * time.Second)
+	}
+
+	return fmt.Errorf("failed to rename new executable after multiple attempts")
+}
+
 func main() {
 	// Parse and filter out auto-restart argument
 	args, autoRestartSeconds := parseAutoRestart(os.Args[1:])
@@ -94,6 +185,11 @@ func main() {
 			log.Println("Program terminated.")
 			return
 		default:
+			// Check for updates before starting the process
+			if err := checkAndUpdateExecutable(exePath); err != nil {
+				log.Printf("Error checking/updating executable: %v", err)
+			}
+
 			log.Println("Starting process:", exePath, "with arguments:", args)
 			cmd := exec.Command(exePath, args...)
 
