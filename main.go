@@ -15,58 +15,16 @@ import (
 	"time"
 )
 
-func killProcess(processName string) {
-	currentPID := os.Getpid()
-	cmd := exec.Command("powershell", "-Command", fmt.Sprintf("Get-Process -Name '%s' -ErrorAction SilentlyContinue | Select-Object Id", strings.TrimSuffix(processName, ".exe")))
-	output, err := cmd.Output()
-	if err != nil {
-		// Ignore error as it might mean no process found
-		log.Printf("No running process found for %s", processName)
-		return
-	}
-
-	// Parse PowerShell output
-	lines := strings.Split(string(output), "\n")
-	foundProcess := false
-	for _, line := range lines {
-		line = strings.TrimSpace(line)
-		if line == "" || strings.Contains(line, "Id") {
-			continue
-		}
-		if pid, err := strconv.Atoi(line); err == nil {
-			if pid != currentPID {
-				foundProcess = true
-				log.Printf("Found process %s with PID %d, attempting to kill...", processName, pid)
-				killCmd := exec.Command("taskkill", "/F", "/PID", strconv.Itoa(pid))
-				if err := killCmd.Run(); err != nil {
-					log.Printf("Warning: Error killing %s (PID %d): %v", processName, pid, err)
-				} else {
-					log.Printf("Successfully killed %s (PID %d)", processName, pid)
-				}
-			} else {
-				log.Printf("Skipping current process (PID %d)", pid)
-			}
-		}
-	}
-	if !foundProcess {
-		log.Printf("No other %s processes found to kill", processName)
-	}
-}
-
-// parseAutoRestart extracts auto-restart value and filters out this argument
 func parseAutoRestart(args []string) ([]string, int) {
 	var filteredArgs []string
 	autoRestartSeconds := 0
 
-	// Parse all --key=value arguments
 	for _, arg := range args {
-		// Skip non-flag arguments
 		if !strings.HasPrefix(arg, "--") {
 			filteredArgs = append(filteredArgs, arg)
 			continue
 		}
 
-		// Split into key-value
 		parts := strings.SplitN(strings.TrimPrefix(arg, "--"), "=", 2)
 		if len(parts) != 2 {
 			filteredArgs = append(filteredArgs, arg)
@@ -74,8 +32,6 @@ func parseAutoRestart(args []string) ([]string, int) {
 		}
 
 		key, value := parts[0], parts[1]
-
-		// Handle auto-restart separately
 		if key == "auto-restart" {
 			if val, err := strconv.Atoi(value); err == nil {
 				autoRestartSeconds = val
@@ -85,67 +41,13 @@ func parseAutoRestart(args []string) ([]string, int) {
 			continue
 		}
 
-		// Keep other flags
 		filteredArgs = append(filteredArgs, arg)
 	}
 
 	return filteredArgs, autoRestartSeconds
 }
 
-// checkAndUpdateExecutable checks for new version and updates if available
-func checkAndUpdateExecutable(exePath string) error {
-	newExePath := "./.main.exe.new"
-
-	// Check if new version exists
-	if _, err := os.Stat(newExePath); os.IsNotExist(err) {
-		return nil // No update available
-	}
-
-	log.Println("Found new version, attempting to update...")
-
-	// Get current process ID to avoid killing ourselves
-	currentPID := os.Getpid()
-	log.Printf("Current process ID: %d", currentPID)
-
-	killProcess("main.exe")
-	killProcess(".main.exe.new")
-
-	// Wait for processes to fully terminate
-	log.Println("Waiting for processes to terminate...")
-	time.Sleep(2 * time.Second)
-
-	// Remove old executable if exists
-	log.Printf("Attempting to remove old executable: %s", exePath)
-	if err := os.Remove(exePath); err != nil {
-		if !os.IsNotExist(err) {
-			log.Printf("Warning: Error removing old executable: %v", err)
-		} else {
-			log.Println("Old executable does not exist, continuing...")
-		}
-	} else {
-		log.Println("Successfully removed old executable")
-	}
-
-	// Wait a bit after removal
-	time.Sleep(1 * time.Second)
-
-	// Rename new executable
-	log.Println("Attempting to rename new executable...")
-	for attempts := 0; attempts < 3; attempts++ {
-		err := os.Rename(newExePath, exePath)
-		if err == nil {
-			log.Println("Successfully updated executable")
-			return nil
-		}
-		log.Printf("Attempt %d: Error renaming executable: %v", attempts+1, err)
-		time.Sleep(1 * time.Second)
-	}
-
-	return fmt.Errorf("failed to rename new executable after multiple attempts")
-}
-
 func main() {
-	// Parse and filter out auto-restart argument
 	args, autoRestartSeconds := parseAutoRestart(os.Args[1:])
 	exePath := "./main.exe"
 	inactivityDuration := 10 * time.Minute
@@ -162,17 +64,25 @@ func main() {
 
 	go func() {
 		<-sigChan
-		log.Println("Received Ctrl+C signal, exiting program...")
+		log.Println("Received shutdown signal. Sending graceful shutdown to main.exe...")
 
 		cmdMutex.Lock()
 		if currentCmd != nil && currentCmd.Process != nil {
+			// Gửi tín hiệu nhẹ nhàng: taskkill không /F
 			pidStr := strconv.Itoa(currentCmd.Process.Pid)
-			err := exec.Command("taskkill", "/T", "/F", "/PID", pidStr).Run()
+			err := exec.Command("taskkill", "/PID", pidStr).Run()
 			if err != nil {
-				log.Println("Error executing taskkill:", err)
+				log.Printf("Error sending shutdown signal to main.exe: %v", err)
 			} else {
-				log.Println("Successfully killed process and its child processes.")
+				log.Println("Sent shutdown signal to main.exe. Waiting for graceful shutdown...")
 			}
+		}
+		cmdMutex.Unlock()
+
+		// Đợi main.exe thoát
+		cmdMutex.Lock()
+		if currentCmd != nil {
+			currentCmd.Wait() // Đợi main.exe tự thoát
 		}
 		cmdMutex.Unlock()
 
@@ -182,15 +92,9 @@ func main() {
 	for {
 		select {
 		case <-exitChan:
-			log.Println("Program terminated.")
+			log.Println("Wrapper exiting after graceful main.exe shutdown.")
 			return
 		default:
-			// Check for updates before starting the process
-			// if err := checkAndUpdateExecutable(exePath); err != nil {
-			// 	log.Printf("Error checking/updating executable: %v", err)
-			// }
-			killProcess("main.exe")
-
 			log.Println("Starting process:", exePath, "with arguments:", args)
 			cmd := exec.Command(exePath, args...)
 
@@ -223,7 +127,7 @@ func main() {
 				scanner := bufio.NewScanner(r)
 				for scanner.Scan() {
 					line := scanner.Text()
-					log.Println(line)
+					fmt.Println(line)
 					select {
 					case outputCh <- struct{}{}:
 					default:
@@ -237,7 +141,6 @@ func main() {
 			stopMonitor := make(chan struct{})
 			monitorDone := make(chan struct{})
 
-			// Auto-restart timer goroutine
 			if autoRestartSeconds > 0 {
 				go func() {
 					timer := time.NewTimer(time.Duration(autoRestartSeconds) * time.Second)
@@ -245,15 +148,10 @@ func main() {
 
 					select {
 					case <-timer.C:
-						log.Printf("Auto-restart timer (%d seconds) expired. Killing process...", autoRestartSeconds)
+						log.Printf("Auto-restart timer (%d seconds) expired. Requesting main.exe to stop...", autoRestartSeconds)
 						if cmd.Process != nil {
 							pidStr := strconv.Itoa(cmd.Process.Pid)
-							err := exec.Command("taskkill", "/T", "/F", "/PID", pidStr).Run()
-							if err != nil {
-								log.Println("Error executing taskkill:", err)
-							} else {
-								log.Println("Successfully killed process for auto-restart.")
-							}
+							_ = exec.Command("taskkill", "/PID", pidStr).Run()
 						}
 					case <-stopMonitor:
 						return
@@ -261,7 +159,6 @@ func main() {
 				}()
 			}
 
-			// Inactivity monitor goroutine
 			go func() {
 				defer close(monitorDone)
 				timer := time.NewTimer(inactivityDuration)
@@ -275,15 +172,10 @@ func main() {
 						}
 						timer.Reset(inactivityDuration)
 					case <-timer.C:
-						log.Printf("No output for %v, process might be hung. Killing process...", inactivityDuration)
+						log.Printf("No output for %v, requesting main.exe stop...", inactivityDuration)
 						if cmd.Process != nil {
 							pidStr := strconv.Itoa(cmd.Process.Pid)
-							err := exec.Command("taskkill", "/T", "/F", "/PID", pidStr).Run()
-							if err != nil {
-								log.Println("Error executing taskkill:", err)
-							} else {
-								log.Println("Successfully killed process and its child processes.")
-							}
+							_ = exec.Command("taskkill", "/PID", pidStr).Run()
 						}
 						return
 					case <-stopMonitor:
