@@ -79,12 +79,7 @@ func main() {
 		}
 		cmdMutex.Unlock()
 
-		// Đợi main.exe thoát
-		cmdMutex.Lock()
-		if currentCmd != nil {
-			currentCmd.Wait() // Đợi main.exe tự thoát
-		}
-		cmdMutex.Unlock()
+		// Việc đợi tiến trình kết thúc đã được thực hiện ở vòng lặp chính
 
 		close(exitChan)
 	}()
